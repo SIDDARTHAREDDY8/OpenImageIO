@@ -2479,33 +2479,72 @@ TIFFInput::read_native_tile_locked(int subimage, int miplevel, int x, int y,
                 errorfmt("{}", oiio_tiff_last_error());
                 return false;
             }
+        // When a CMYK->RGB conversion is pending, the unpacked values have
+        // the full input channel count and must not be written straight
+        // into the (narrower) output buffer, so route them through scratch
+        // space instead.
+        bool use_scratch_dest = m_separate
+                                || (m_photometric == PHOTOMETRIC_SEPARATED
+                                    && !m_raw_color);
         if (m_bitspersample < 8) {
             // m_scratch now holds nvals n-bit values, contig or separate
+            scratch2.resize(nvals * m_spec.format.size());
             std::swap(m_scratch, scratch2);
             for (int c = 0; c < planes; ++c) /* planes==1 for contig */
                 bit_convert(m_separate ? tile_pixels : nvals,
                             &scratch2[plane_bytes * c], m_bitspersample,
-                            m_separate
+                            use_scratch_dest
                                 ? m_scratch.data() + plane_bytes * c
                                 : (unsigned char*)data.data() + plane_bytes * c,
                             8);
         } else if (m_bitspersample > 8 && m_bitspersample < 16) {
             // m_scratch now holds nvals n-bit values, contig or separate
+            scratch2.resize(nvals * m_spec.format.size());
             std::swap(m_scratch, scratch2);
             for (int c = 0; c < planes; ++c) /* planes==1 for contig */
                 bit_convert(m_separate ? tile_pixels : nvals,
                             &scratch2[plane_bytes * c], m_bitspersample,
-                            m_separate
+                            use_scratch_dest
                                 ? m_scratch.data() + plane_bytes * c
                                 : (unsigned char*)data.data() + plane_bytes * c,
                             16);
         }
         if (m_separate) {
             // Convert from separate (RRRGGGBBB) to contiguous (RGBRGBRGB).
-            // We know the data is in m_scratch at this point, so
-            // contiguize it into the user data area.
-            separate_to_contig(planes, tile_pixels,
-                               as_bytes(make_span(m_scratch)), data);
+            // We know the data is in m_scratch at this point.
+            if (m_photometric == PHOTOMETRIC_SEPARATED && !m_raw_color) {
+                // A CMYK->RGB conversion comes next and needs the 4-channel
+                // data contiguous, so contiguize into temp storage rather
+                // than overflowing the narrower 3-channel output buffer.
+                std::vector<unsigned char> scratch3(nvals
+                                                    * m_spec.format.size());
+                separate_to_contig(planes, tile_pixels,
+                                   as_bytes(make_span(m_scratch)),
+                                   as_writable_bytes(make_span(scratch3)));
+                m_scratch.swap(scratch3);
+            } else {
+                // If no CMYK->RGB conversion is necessary, we can "separate"
+                // straight into the data area.
+                separate_to_contig(planes, tile_pixels,
+                                   as_bytes(make_span(m_scratch)), data);
+            }
+        }
+    }
+
+    // Handle CMYK
+    if (m_photometric == PHOTOMETRIC_SEPARATED && !m_raw_color) {
+        // The CMYK will be in m_scratch.
+        if (spec().format == TypeDesc::UINT8) {
+            cmyk_to_rgb(tile_pixels, (unsigned char*)m_scratch.data(),
+                        m_inputchannels, (unsigned char*)data.data(),
+                        m_spec.nchannels);
+        } else if (spec().format == TypeDesc::UINT16) {
+            cmyk_to_rgb(tile_pixels, (unsigned short*)m_scratch.data(),
+                        m_inputchannels, (unsigned short*)data.data(),
+                        m_spec.nchannels);
+        } else {
+            errorfmt("CMYK only supported for UINT8, UINT16");
+            return false;
         }
     }
 

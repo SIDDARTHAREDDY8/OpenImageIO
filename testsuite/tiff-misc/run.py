@@ -40,6 +40,16 @@ command += iconvert ("src/crash-cmyk-e12b.tif out.tif", failureok=True)
 # causing a heap buffer overflow.
 command += info_command ("src/crash-cmyk-1bit.tif", safematch=True)
 
+# Regression test for issue #5315: a *tiled* CMYK (photometric=separated) TIFF
+# with <8 bits/sample used to heap-buffer-overflow in TIFFInput::bit_convert,
+# because the sub-8-bit unpacker wrote the unpacked 4-channel values straight
+# into the 3-channel RGB output buffer instead of scratch space. (The
+# crash-cmyk-1bit.tif test above only exercises the scanline path.) --stats
+# forces reading through the tile path.
+command += info_command ("src/crash-cmyk-1bit-tiled.tif", info_program="iinfo",
+                         extraargs="--stats", verbose=False, hash=False)
+
+
 # Regression: a valid DEFLATE TIFF whose StripOffsets[0] points past EOF must
 # be rejected cleanly during the pixel read (not read out of bounds). Placed
 # last so its output appends at the tail of every libtiff-version ref variant.
